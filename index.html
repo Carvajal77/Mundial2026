@@ -317,6 +317,13 @@ body.emode .eteam:hover{background:rgba(0,51,160,.07);}
       <div class="etog" id="etog" onclick="toggleEdit()">
         <div class="edot"></div><span id="etogLbl">✏️ Editar</span>
       </div>
+      <div class="etog" onclick="exportData()" title="Exportar data.json para subir a GitHub">
+        📤 Publicar datos
+      </div>
+      <label class="etog" title="Importar data.json desde GitHub o backup" style="cursor:pointer">
+        📥 Importar datos
+        <input type="file" accept=".json" onchange="importData(event)" style="display:none">
+      </label>
     </div>
   </div>
   <div class="htabs">
@@ -2289,8 +2296,122 @@ function loadAll(){
 }
 
 // ═══════════════════════════════════════
-// TOAST
+// EXPORT / IMPORT / GITHUB SYNC
 // ═══════════════════════════════════════
+const GITHUB_RAW = 'https://raw.githubusercontent.com/Carvajal77/Mundial2026/main/data.json';
+
+function exportData() {
+  const payload = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    monthData,
+    metas,
+    activeMonths,
+    teams: BASE_TEAMS.map(t => ({
+      id: t.id, name: t.name, line: t.line,
+      lider: t.lider||'', asistente: t.asistente||'',
+      medico: t.medico||'', mentor: t.mentor||''
+    }))
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'data.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  showToast('✅ data.json descargado — súbelo a GitHub para publicar');
+}
+
+function importData(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      applyPayload(JSON.parse(e.target.result));
+      showToast('✅ Datos importados correctamente');
+    } catch(err) {
+      showToast('❌ Error al importar: archivo inválido');
+    }
+  };
+  reader.readAsText(file);
+  evt.target.value = '';
+}
+
+function applyPayload(data) {
+  if (!data || !data.version) throw new Error('Formato inválido');
+
+  // Equipos
+  if (data.teams) {
+    data.teams.forEach(s => {
+      const t = BASE_TEAMS.find(x => x.id === s.id);
+      if (t) { t.name=s.name; t.line=s.line; t.lider=s.lider||''; t.asistente=s.asistente||''; t.medico=s.medico||''; t.mentor=s.mentor||''; }
+    });
+  }
+
+  // Metas — normalizar claves a número
+  if (data.metas) {
+    metas = {};
+    Object.keys(data.metas).forEach(tk => {
+      const ti = parseInt(tk); if (isNaN(ti)) return;
+      metas[ti] = {};
+      Object.keys(data.metas[tk]).forEach(mk => {
+        const mi = parseInt(mk); if (!isNaN(mi)) metas[ti][mi] = data.metas[tk][mk];
+      });
+    });
+  }
+
+  // monthData — normalizar claves a número
+  if (data.monthData) {
+    monthData = {};
+    Object.keys(data.monthData).forEach(mk => {
+      const mi = parseInt(mk); if (isNaN(mi)) return;
+      monthData[mi] = {};
+      Object.keys(data.monthData[mk]).forEach(tk => {
+        const ti = parseInt(tk);
+        if (!isNaN(ti)) {
+          monthData[mi][ti] = data.monthData[mk][tk];
+          // Asegurar estructura desemp
+          if (!monthData[mi][ti].desemp) monthData[mi][ti].desemp = defaultDesemp();
+        }
+      });
+    });
+  }
+
+  // activeMonths
+  if (data.activeMonths) {
+    activeMonths = data.activeMonths.map(Number).filter(m => m < CUR_M && !!monthData[m]);
+  }
+  if (!activeMonths.length) {
+    activeMonths = Object.keys(monthData).map(Number).filter(m => m < CUR_M).sort((a,b)=>a-b);
+  }
+  if (!activeMonths.length) activeMonths = [LAST_EDITABLE_M];
+
+  saveAll();
+
+  // Ir al mes más reciente con datos
+  let startM = LAST_EDITABLE_M;
+  for (let m = LAST_EDITABLE_M; m >= 0; m--) {
+    if (monthData[m] && Object.keys(monthData[m]).length > 0) { startM = m; break; }
+  }
+  setMonth(startM);
+}
+
+async function loadFromGitHub() {
+  try {
+    // Cache-busting para evitar versión antigua
+    const url = GITHUB_RAW + '?t=' + Date.now();
+    const res = await fetch(url);
+    if (!res.ok) return; // No hay data.json aún — usar localStorage
+    const data = await res.json();
+    applyPayload(data);
+    console.log('✅ Datos cargados desde GitHub');
+  } catch(e) {
+    console.log('ℹ️ Sin datos en GitHub, usando localStorage');
+  }
+}
+
+
 function showToast(msg){
   const t=document.getElementById('toast');
   t.textContent=msg; t.classList.add('show');
@@ -2301,7 +2422,19 @@ function showToast(msg){
 // INIT
 // ═══════════════════════════════════════
 try {
-  loadAll();
+  // Intentar cargar desde GitHub primero, luego localStorage como respaldo
+  loadFromGitHub().catch(() => {
+    loadAll();
+    initDashboard();
+  }).then(() => {
+    initDashboard();
+  });
+} catch(e) {
+  console.error('Error al inicializar:', e);
+  document.body.insertAdjacentHTML('afterbegin',`<div style="background:#c0392b;color:#fff;padding:16px 24px;font-family:sans-serif;font-size:14px;position:fixed;top:0;left:0;right:0;z-index:9999">❌ Error al cargar: <b>${e.message}</b></div>`);
+}
+
+function initDashboard() {
   let startMonth = LAST_EDITABLE_M;
   for(let m=LAST_EDITABLE_M;m>=0;m--){ if(monthData[m]&&Object.keys(monthData[m]).length>0){startMonth=m;break;} }
   if(startMonth < 0 || startMonth >= CUR_M) startMonth = LAST_EDITABLE_M;
@@ -2312,9 +2445,6 @@ try {
   activeMonths=activeMonths.filter(m=>m<CUR_M);
   if(!activeMonths.length) activeMonths=[startMonth];
   setMonth(startMonth);
-} catch(e) {
-  console.error('Error al inicializar:', e);
-  document.body.insertAdjacentHTML('afterbegin',`<div style="background:#c0392b;color:#fff;padding:16px 24px;font-family:sans-serif;font-size:14px;position:fixed;top:0;left:0;right:0;z-index:9999">❌ Error al cargar: <b>${e.message}</b></div>`);
 }
 </script>
 </body>
